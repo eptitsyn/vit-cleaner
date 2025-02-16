@@ -77,12 +77,13 @@ class DocumentCleaningModule(pl.LightningModule):
         model_name="google/vit-base-patch16-224-in21k",
         img_size=224,
         patch_size=16,
-        learning_rate=1e-4,
+        learning_rate=1e-5,  # Lower learning rate for transformer
         weight_decay=0.01,
-        loss_alpha=0.8,
-        train_batch_size=32,
-        eval_batch_size=64,
+        loss_alpha=0.5,
+        train_batch_size=8,  # Smaller batch size for transformer
+        eval_batch_size=16,
         num_workers=4,
+        warmup_steps=500,
         train_clean_dir=None,
         train_corrupted_dir=None,
         val_clean_dir=None,
@@ -93,15 +94,26 @@ class DocumentCleaningModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        # Initialize model
-        self.model = DocumentCleaningViT(
-            pretrained_model_name=model_name,
-            img_size=img_size,
-            patch_size=patch_size
-        )
+        model_kwargs = {
+            'pretrained_model_name': model_name,
+            'img_size': img_size,
+            'patch_size': patch_size
+        }
+        self.model = DocumentCleaningViT(**model_kwargs)
 
-        # Initialize loss
-        self.criterion = DocumentCleaningLoss(alpha=loss_alpha)
+        # Loss functions
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+
+        # Save hyperparameters
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.loss_alpha = loss_alpha
+        self.warmup_steps = warmup_steps
+
+        # Initialize step counter for logging
+        self.train_step_count = 0
+        self.val_step_count = 0
 
         # Data transforms
         self.transform = A.Compose([
@@ -119,15 +131,25 @@ class DocumentCleaningModule(pl.LightningModule):
 
         # Forward pass
         cleaned = self(corrupted)
-        loss = self.criterion(cleaned, clean)
 
-        # Log training metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Since model outputs tanh activation, scale targets to [-1, 1]
+        clean = clean * 2 - 1
 
-        if batch_idx == 0:
-            # Log sample images
+        # Compute losses
+        l1_loss = self.l1_loss(cleaned, clean)
+        mse_loss = self.mse_loss(cleaned, clean)
+        loss = self.loss_alpha * l1_loss + (1 - self.loss_alpha) * mse_loss
+
+        # Log losses more frequently (every step)
+        self.log('train/l1_loss', l1_loss, on_step=True, prog_bar=True)
+        self.log('train/mse_loss', mse_loss, on_step=True, prog_bar=True)
+        self.log('train/total_loss', loss, on_step=True, prog_bar=True)
+
+        # Log sample images every 100 steps
+        if self.train_step_count % 100 == 0:
             self._log_images(clean, corrupted, cleaned, 'train')
 
+        self.train_step_count += 1
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -136,59 +158,86 @@ class DocumentCleaningModule(pl.LightningModule):
 
         # Forward pass
         cleaned = self(corrupted)
-        loss = self.criterion(cleaned, clean)
+
+        # Scale targets to [-1, 1] to match tanh output
+        clean = clean * 2 - 1
+
+        # Compute losses
+        l1_loss = self.l1_loss(cleaned, clean)
+        mse_loss = self.mse_loss(cleaned, clean)
+        loss = self.loss_alpha * l1_loss + (1 - self.loss_alpha) * mse_loss
 
         # Log validation metrics
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('val/l1_loss', l1_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('val/mse_loss', mse_loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('val/total_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        if batch_idx == 0:
-            # Log sample images
+        # Log sample images every 50 validation steps
+        if self.val_step_count % 50 == 0:
             self._log_images(clean, corrupted, cleaned, 'val')
 
+        self.val_step_count += 1
         return loss
 
     def _log_images(self, clean, corrupted, cleaned, prefix, num_images=4):
-        # Denormalize images
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(clean.device)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(clean.device)
+        # Scale back to [0, 1] for visualization
+        cleaned = (cleaned + 1) / 2
+        clean = (clean + 1) / 2
 
-        clean = clean[:num_images] * std + mean
-        corrupted = corrupted[:num_images] * std + mean
-        cleaned = cleaned[:num_images] * std + mean
+        # Take first num_images
+        clean = clean[:num_images]
+        corrupted = corrupted[:num_images]
+        cleaned = cleaned[:num_images]
 
-        # Clip values to [0, 1]
-        clean = torch.clamp(clean, 0, 1)
-        corrupted = torch.clamp(corrupted, 0, 1)
-        cleaned = torch.clamp(cleaned, 0, 1)
-
-        # Create image grid
+        # Create grid
         grid = torchvision.utils.make_grid(
             torch.cat([clean, corrupted, cleaned]),
             nrow=num_images
         )
 
         # Log to tensorboard
-        self.logger.experiment.add_image(f'{prefix}_samples', grid, self.current_epoch)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.hparams.learning_rate,
-            weight_decay=self.hparams.weight_decay
+        self.logger.experiment.add_image(
+            f'{prefix}/samples',
+            grid,
+            global_step=self.train_step_count if prefix == 'train' else self.val_step_count
         )
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    def configure_optimizers(self):
+        # Separate parameters for different learning rates
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in self.model.named_parameters()
+                          if not any(nd in n for nd in no_decay)],
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "params": [p for n, p in self.model.named_parameters()
+                          if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters,
+            lr=self.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+
+        scheduler = get_cosine_schedule_with_warmup(
             optimizer,
-            T_max=self.trainer.max_epochs,
-            eta_min=self.hparams.learning_rate * 0.01
+            num_warmup_steps=self.warmup_steps,
+            num_training_steps=self.trainer.estimated_stepping_batches
         )
 
         return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': scheduler,
-                'interval': 'epoch'
-            }
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1
+            },
         }
 
     def train_dataloader(self):
@@ -225,12 +274,13 @@ class DocumentCleaningModule(pl.LightningModule):
         parser.add_argument('--model_name', type=str, default="google/vit-base-patch16-224-in21k")
         parser.add_argument('--img_size', type=int, default=224)
         parser.add_argument('--patch_size', type=int, default=16)
-        parser.add_argument('--learning_rate', type=float, default=1e-4)
+        parser.add_argument('--learning_rate', type=float, default=1e-5)
         parser.add_argument('--weight_decay', type=float, default=0.01)
-        parser.add_argument('--loss_alpha', type=float, default=0.8)
-        parser.add_argument('--train_batch_size', type=int, default=32)
-        parser.add_argument('--eval_batch_size', type=int, default=64)
+        parser.add_argument('--loss_alpha', type=float, default=0.5)
+        parser.add_argument('--train_batch_size', type=int, default=8)
+        parser.add_argument('--eval_batch_size', type=int, default=16)
         parser.add_argument('--num_workers', type=int, default=4)
+        parser.add_argument('--warmup_steps', type=int, default=500)
         return parent_parser
 
 
