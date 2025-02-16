@@ -11,8 +11,22 @@ from albumentations.pytorch import ToTensorV2
 from PIL import Image
 import numpy as np
 import torchvision
+import torch.nn as nn
 
-from model.visual_transformer import DocumentCleaningViT, DocumentCleaningLoss
+from model import DocumentCleaningViT
+
+
+class DocumentCleaningLoss(nn.Module):
+    def __init__(self, alpha=0.8):
+        super().__init__()
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+        self.alpha = alpha
+
+    def forward(self, pred, target):
+        l1 = self.l1_loss(pred, target)
+        mse = self.mse_loss(pred, target)
+        return self.alpha * l1 + (1 - self.alpha) * mse
 
 
 class DocumentCleaningDataset(Dataset):
@@ -79,13 +93,12 @@ class DocumentCleaningModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        # Initialize model with only relevant parameters
-        model_kwargs = {
-            'pretrained_model_name': model_name,
-            'img_size': img_size,
-            'patch_size': patch_size
-        }
-        self.model = DocumentCleaningViT(**model_kwargs)
+        # Initialize model
+        self.model = DocumentCleaningViT(
+            pretrained_model_name=model_name,
+            img_size=img_size,
+            patch_size=patch_size
+        )
 
         # Initialize loss
         self.criterion = DocumentCleaningLoss(alpha=loss_alpha)
@@ -218,8 +231,6 @@ class DocumentCleaningModule(pl.LightningModule):
         parser.add_argument('--train_batch_size', type=int, default=32)
         parser.add_argument('--eval_batch_size', type=int, default=64)
         parser.add_argument('--num_workers', type=int, default=4)
-        parser.add_argument('--decoder_layers', type=int, default=6)
-        parser.add_argument('--decoder_heads', type=int, default=8)
         return parent_parser
 
 

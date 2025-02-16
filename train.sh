@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Create checkpoints directory
-mkdir -p checkpoints
+mkdir -p checkpoints lightning_logs
 
 python train.py \
     --train_clean_dir data/train/clean \
@@ -17,6 +17,4 @@ python train.py \
     --eval_batch_size 64 \
     --num_workers 4 \
     --img_size 224 \
-    --patch_size 16 \
-    --decoder_layers 6 \
-    --decoder_heads 8
+    --patch_size 16
