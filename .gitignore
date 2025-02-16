@@ -1,0 +1,10 @@
+checkpoints/
+lightning_logs/
+data/
+__pycache__/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.webm
