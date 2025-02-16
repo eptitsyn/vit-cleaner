@@ -47,11 +47,10 @@ class DocumentCleaningViT(nn.Module):
         batch_size = x.shape[0]
 
         # Get encoder features [batch_size, num_patches + 1, hidden_size]
-        encoder_output = self.encoder(x, output_hidden_states=True)
+        encoder_output = self.encoder(x).last_hidden_state
 
-        # Use all hidden states from encoder for better feature representation
-        hidden_states = torch.stack(encoder_output.hidden_states)  # [num_layers, batch_size, num_patches + 1, hidden_size]
-        memory = hidden_states.mean(dim=0)[:, 1:, :]  # Average across layers, remove CLS token
+        # Remove CLS token and use as memory
+        memory = encoder_output[:, 1:, :]  # [batch_size, num_patches, hidden_size]
 
         # Add positional information to memory
         memory = memory + self.pos_embedding
