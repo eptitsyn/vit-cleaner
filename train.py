@@ -78,12 +78,15 @@ class DocumentCleaningModule(pl.LightningModule):
         model_name="google/vit-base-patch16-224-in21k",
         img_size=224,
         patch_size=16,
-        learning_rate=1e-5,  # Lower learning rate for transformer
-        weight_decay=0.01,
-        loss_alpha=0.5,
-        train_batch_size=8,  # Smaller batch size for transformer
-        eval_batch_size=16,
-        num_workers=4,
+        learning_rate=5e-5,
+        weight_decay=0.05,
+        loss_alpha=0.7,
+        train_batch_size=16,  # Increased for better GPU utilization
+        eval_batch_size=32,
+        num_workers=8,        # Increased for faster data loading
+        pin_memory=True,      # Added for faster data transfer to GPU
+        persistent_workers=True,  # Keep workers alive between epochs
+        prefetch_factor=2,    # Prefetch batches
         warmup_steps=500,
         train_clean_dir=None,
         train_corrupted_dir=None,
@@ -209,12 +212,12 @@ class DocumentCleaningModule(pl.LightningModule):
         optimizer_grouped_parameters = [
             {
                 "params": [p for n, p in self.model.named_parameters()
-                          if not any(nd in n for nd in no_decay)],
+                           if not any(nd in n for nd in no_decay)],
                 "weight_decay": self.weight_decay,
             },
             {
                 "params": [p for n, p in self.model.named_parameters()
-                          if any(nd in n for nd in no_decay)],
+                           if any(nd in n for nd in no_decay)],
                 "weight_decay": 0.0,
             },
         ]
@@ -252,7 +255,9 @@ class DocumentCleaningModule(pl.LightningModule):
             batch_size=self.hparams.train_batch_size,
             shuffle=True,
             num_workers=self.hparams.num_workers,
-            pin_memory=True
+            pin_memory=self.hparams.pin_memory,
+            persistent_workers=self.hparams.persistent_workers,
+            prefetch_factor=self.hparams.prefetch_factor
         )
 
     def val_dataloader(self):
@@ -266,7 +271,9 @@ class DocumentCleaningModule(pl.LightningModule):
             batch_size=self.hparams.eval_batch_size,
             shuffle=False,
             num_workers=self.hparams.num_workers,
-            pin_memory=True
+            pin_memory=self.hparams.pin_memory,
+            persistent_workers=self.hparams.persistent_workers,
+            prefetch_factor=self.hparams.prefetch_factor
         )
 
     @staticmethod
@@ -275,12 +282,15 @@ class DocumentCleaningModule(pl.LightningModule):
         parser.add_argument('--model_name', type=str, default="google/vit-base-patch16-224-in21k")
         parser.add_argument('--img_size', type=int, default=224)
         parser.add_argument('--patch_size', type=int, default=16)
-        parser.add_argument('--learning_rate', type=float, default=1e-5)
-        parser.add_argument('--weight_decay', type=float, default=0.01)
-        parser.add_argument('--loss_alpha', type=float, default=0.5)
-        parser.add_argument('--train_batch_size', type=int, default=8)
-        parser.add_argument('--eval_batch_size', type=int, default=16)
-        parser.add_argument('--num_workers', type=int, default=4)
+        parser.add_argument('--learning_rate', type=float, default=5e-5)
+        parser.add_argument('--weight_decay', type=float, default=0.05)
+        parser.add_argument('--loss_alpha', type=float, default=0.7)
+        parser.add_argument('--train_batch_size', type=int, default=16)
+        parser.add_argument('--eval_batch_size', type=int, default=32)
+        parser.add_argument('--num_workers', type=int, default=8)
+        parser.add_argument('--pin_memory', type=bool, default=True)
+        parser.add_argument('--persistent_workers', type=bool, default=True)
+        parser.add_argument('--prefetch_factor', type=int, default=2)
         parser.add_argument('--warmup_steps', type=int, default=500)
         return parent_parser
 
