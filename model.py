@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import ViTModel
-from vit_pytorch import Transformer
+from vit_pytorch.vit import Transformer
 
 
 class DocumentCleaningViT(nn.Module):

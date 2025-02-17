@@ -183,6 +183,8 @@ def main():
     parser.add_argument('--max_epochs', type=int, default=100)
     parser.add_argument('--warmup_steps', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=5e-5)
+    parser.add_argument('--ckpt_path', type=str, default=None,
+                        help='Path to checkpoint to resume training from')
 
     args = parser.parse_args()
 
@@ -204,15 +206,23 @@ def main():
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
         accelerator='gpu',
-        devices=2,
+        devices=1,
         precision='16-mixed',
         logger=logger,
         callbacks=[checkpoint_callback, lr_monitor],
         log_every_n_steps=10
     )
 
-    model = DocumentCleaningModule(**vars(args))
-    trainer.fit(model)
+    if args.ckpt_path:
+        model = DocumentCleaningModule.load_from_checkpoint(
+            args.ckpt_path,
+            **vars(args)
+        )
+        print(f"Resuming from checkpoint: {args.ckpt_path}")
+    else:
+        model = DocumentCleaningModule(**vars(args))
+
+    trainer.fit(model, ckpt_path=args.ckpt_path)
 
 
 if __name__ == '__main__':
