@@ -9,8 +9,8 @@ python train.py \
     --val_clean_dir data/val/clean \
     --val_corrupted_dir data/val/corrupted \
     --max_epochs 100 \
-    --accelerator cpu \
-    --devices 1 \
+    --accelerator gpu \
+    --devices 2 \
     --learning_rate 1e-4 \
     --weight_decay 0.01 \
     --train_batch_size 32 \

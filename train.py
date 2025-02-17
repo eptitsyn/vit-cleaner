@@ -12,6 +12,7 @@ from PIL import Image
 import numpy as np
 import torchvision
 import torch.nn as nn
+from transformers import AutoImageProcessor
 
 from model import DocumentCleaningViT
 from utils import get_cosine_schedule_with_warmup
@@ -31,44 +32,45 @@ class DocumentCleaningLoss(nn.Module):
 
 
 class DocumentCleaningDataset(Dataset):
-    def __init__(self, clean_dir, corrupted_dir, transform=None):
+    def __init__(self, clean_dir, corrupted_dir, image_processor=None):
         """
         Dataset for document cleaning.
 
         Args:
             clean_dir (str): Directory containing clean document images
             corrupted_dir (str): Directory containing corrupted document images
-            transform: Albumentations transforms
+            image_processor: Image processor from transformers
         """
         self.clean_dir = clean_dir
         self.corrupted_dir = corrupted_dir
-        self.transform = transform
+        self.image_processor = image_processor
 
-        self.image_files = [f for f in os.listdir(clean_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        # Cache file lists
+        self.image_files = sorted([
+            f for f in os.listdir(clean_dir)
+            if f.endswith(('.png', '.jpg', '.jpeg'))
+        ])
+
+        # Pre-compute file paths
+        self.clean_paths = [os.path.join(clean_dir, f) for f in self.image_files]
+        self.corrupted_paths = [os.path.join(corrupted_dir, f) for f in self.image_files]
 
     def __len__(self):
         return len(self.image_files)
 
     def __getitem__(self, idx):
-        img_name = self.image_files[idx]
+        # Load images
+        clean_img = Image.open(self.clean_paths[idx]).convert('RGB')
+        corrupted_img = Image.open(self.corrupted_paths[idx]).convert('RGB')
 
-        # Load clean and corrupted images
-        clean_path = os.path.join(self.clean_dir, img_name)
-        corrupted_path = os.path.join(self.corrupted_dir, img_name)
-
-        clean_img = np.array(Image.open(clean_path).convert('RGB'))
-        corrupted_img = np.array(Image.open(corrupted_path).convert('RGB'))
-
-        if self.transform:
-            # Apply same transform to both images
-            transformed = self.transform(image=clean_img, image1=corrupted_img)
-            clean_img = transformed['image']
-            corrupted_img = transformed['image1']
+        # Process images using the model's preprocessor
+        clean_processed = self.image_processor(clean_img, return_tensors="pt")["pixel_values"][0]
+        corrupted_processed = self.image_processor(corrupted_img, return_tensors="pt")["pixel_values"][0]
 
         return {
-            'clean': clean_img,
-            'corrupted': corrupted_img,
-            'filename': img_name
+            'clean': clean_processed,
+            'corrupted': corrupted_processed,
+            'filename': self.image_files[idx]
         }
 
 
@@ -81,12 +83,12 @@ class DocumentCleaningModule(pl.LightningModule):
         learning_rate=5e-5,
         weight_decay=0.05,
         loss_alpha=0.7,
-        train_batch_size=16,  # Increased for better GPU utilization
-        eval_batch_size=32,
-        num_workers=8,        # Increased for faster data loading
-        pin_memory=True,      # Added for faster data transfer to GPU
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2,    # Prefetch batches
+        train_batch_size=32,
+        eval_batch_size=64,
+        num_workers=12,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=3,
         warmup_steps=500,
         train_clean_dir=None,
         train_corrupted_dir=None,
@@ -97,6 +99,9 @@ class DocumentCleaningModule(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # Get the image processor from the pretrained model
+        self.image_processor = AutoImageProcessor.from_pretrained(model_name)
 
         model_kwargs = {
             'pretrained_model_name': model_name,
@@ -119,13 +124,6 @@ class DocumentCleaningModule(pl.LightningModule):
         self.train_step_count = 0
         self.val_step_count = 0
 
-        # Data transforms
-        self.transform = A.Compose([
-            A.Resize(img_size, img_size),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
-        ], additional_targets={'image1': 'image'})
-
     def forward(self, x):
         return self.model(x)
 
@@ -133,27 +131,23 @@ class DocumentCleaningModule(pl.LightningModule):
         clean = batch['clean']
         corrupted = batch['corrupted']
 
-        # Forward pass
-        cleaned = self(corrupted)
+        # Process images using the model's preprocessor
+        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+            # Forward pass with preprocessed images
+            cleaned = self(corrupted)
+            # clean = clean * 2 - 1  # Scale to [-1, 1] to match tanh output
 
-        # Since model outputs tanh activation, scale targets to [-1, 1]
-        clean = clean * 2 - 1
+            l1_loss = self.l1_loss(cleaned, clean)
+            mse_loss = self.mse_loss(cleaned, clean)
+            loss = self.loss_alpha * l1_loss + (1 - self.loss_alpha) * mse_loss
 
-        # Compute losses
-        l1_loss = self.l1_loss(cleaned, clean)
-        mse_loss = self.mse_loss(cleaned, clean)
-        loss = self.loss_alpha * l1_loss + (1 - self.loss_alpha) * mse_loss
-
-        # Log losses more frequently (every step)
-        self.log('train/l1_loss', l1_loss, on_step=True, prog_bar=True)
-        self.log('train/mse_loss', mse_loss, on_step=True, prog_bar=True)
-        self.log('train/total_loss', loss, on_step=True, prog_bar=True)
-
-        # Log sample images every 100 steps
-        if self.train_step_count % 100 == 0:
+        # Reduce logging frequency
+        if self.global_step % 500 == 0:
+            self.log('train/l1_loss', l1_loss, on_step=True, prog_bar=True)
+            self.log('train/mse_loss', mse_loss, on_step=True, prog_bar=True)
+            self.log('train/total_loss', loss, on_step=True, prog_bar=True)
             self._log_images(clean, corrupted, cleaned, 'train')
 
-        self.train_step_count += 1
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -248,7 +242,7 @@ class DocumentCleaningModule(pl.LightningModule):
         train_dataset = DocumentCleaningDataset(
             clean_dir=self.hparams.train_clean_dir,
             corrupted_dir=self.hparams.train_corrupted_dir,
-            transform=self.transform
+            image_processor=self.image_processor
         )
         return DataLoader(
             train_dataset,
@@ -257,14 +251,15 @@ class DocumentCleaningModule(pl.LightningModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             persistent_workers=self.hparams.persistent_workers,
-            prefetch_factor=self.hparams.prefetch_factor
+            prefetch_factor=self.hparams.prefetch_factor,
+            drop_last=True
         )
 
     def val_dataloader(self):
         val_dataset = DocumentCleaningDataset(
             clean_dir=self.hparams.val_clean_dir,
             corrupted_dir=self.hparams.val_corrupted_dir,
-            transform=self.transform
+            image_processor=self.image_processor
         )
         return DataLoader(
             val_dataset,
@@ -285,12 +280,12 @@ class DocumentCleaningModule(pl.LightningModule):
         parser.add_argument('--learning_rate', type=float, default=5e-5)
         parser.add_argument('--weight_decay', type=float, default=0.05)
         parser.add_argument('--loss_alpha', type=float, default=0.7)
-        parser.add_argument('--train_batch_size', type=int, default=16)
-        parser.add_argument('--eval_batch_size', type=int, default=32)
-        parser.add_argument('--num_workers', type=int, default=8)
+        parser.add_argument('--train_batch_size', type=int, default=32)
+        parser.add_argument('--eval_batch_size', type=int, default=64)
+        parser.add_argument('--num_workers', type=int, default=12)
         parser.add_argument('--pin_memory', type=bool, default=True)
         parser.add_argument('--persistent_workers', type=bool, default=True)
-        parser.add_argument('--prefetch_factor', type=int, default=2)
+        parser.add_argument('--prefetch_factor', type=int, default=3)
         parser.add_argument('--warmup_steps', type=int, default=500)
         return parent_parser
 
@@ -321,7 +316,7 @@ def main():
 
     # Initialize callbacks
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_loss',
+        monitor='val/total_loss',
         dirpath='checkpoints',
         filename='document-cleaning-{epoch:02d}-{val_loss:.2f}',
         save_top_k=3,
@@ -330,13 +325,18 @@ def main():
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
-    # Initialize trainer
+    # Initialize trainer with performance optimizations
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
+        accelerator=args.accelerator,
+        devices=args.devices,
+        precision='16-mixed',
+        accumulate_grad_batches=4,
+        # strategy='ddp_find_unused_parameters_false',
         logger=logger,
         callbacks=[checkpoint_callback, lr_monitor],
-        accelerator=args.accelerator,
-        devices=args.devices
+        enable_progress_bar=True,
+        log_every_n_steps=10,
     )
 
     # Initialize model
