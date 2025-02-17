@@ -135,7 +135,8 @@ class DocumentCleaningModule(pl.LightningModule):
                 num_training_steps=self.max_steps
             ),
             "interval": "step",
-            "frequency": 1
+            "frequency": 1,
+            "name": "learning_rate"
         }
 
         return [optimizer], [scheduler]
@@ -173,16 +174,24 @@ class DocumentCleaningModule(pl.LightningModule):
 
 
 def main():
+    torch.set_float32_matmul_precision('high')
     parser = ArgumentParser()
     parser.add_argument('--train_clean_dir', type=str, required=True)
     parser.add_argument('--train_corrupted_dir', type=str, required=True)
     parser.add_argument('--val_clean_dir', type=str, required=True)
     parser.add_argument('--val_corrupted_dir', type=str, required=True)
     parser.add_argument('--max_epochs', type=int, default=100)
+    parser.add_argument('--warmup_steps', type=int, default=1000)
+    parser.add_argument('--learning_rate', type=float, default=5e-5)
 
     args = parser.parse_args()
 
     logger = TensorBoardLogger('lightning_logs', name='document-cleaning')
+
+    lr_monitor = LearningRateMonitor(
+        logging_interval='step',
+        log_momentum=True
+    )
 
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
@@ -198,7 +207,7 @@ def main():
         devices=2,
         precision='16-mixed',
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, lr_monitor],
         log_every_n_steps=10
     )
 
