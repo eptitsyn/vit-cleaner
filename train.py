@@ -14,6 +14,7 @@ import torchvision
 import torch.nn as nn
 
 from model import DocumentCleaningViT
+from utils import get_cosine_schedule_with_warmup
 
 
 class DocumentCleaningLoss(nn.Module):
