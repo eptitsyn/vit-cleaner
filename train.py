@@ -12,6 +12,7 @@ import torch.nn as nn
 from transformers import AutoImageProcessor
 
 from model import DocumentCleaningViT
+from utils import get_cosine_schedule_with_warmup
 
 
 class DocumentCleaningDataset(Dataset):
@@ -54,6 +55,8 @@ class DocumentCleaningModule(pl.LightningModule):
         train_batch_size=32,
         eval_batch_size=64,
         num_workers=12,
+        warmup_steps=1000,
+        max_steps=None,
         **kwargs
     ):
         super().__init__()
@@ -63,6 +66,8 @@ class DocumentCleaningModule(pl.LightningModule):
         self.model = DocumentCleaningViT(model_name, img_size, patch_size)
         self.mse_loss = nn.MSELoss()
         self.learning_rate = learning_rate
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
 
     def forward(self, x):
         return self.model(x)
@@ -71,7 +76,7 @@ class DocumentCleaningModule(pl.LightningModule):
         clean = batch['clean']
         corrupted = batch['corrupted']
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
             cleaned = self(corrupted)
             clean = clean * 2 - 1  # Scale to [-1, 1] to match tanh output
             loss = self.mse_loss(cleaned, clean)
@@ -114,8 +119,26 @@ class DocumentCleaningModule(pl.LightningModule):
         self.logger.experiment.add_image(f'{prefix}/samples', grid, self.global_step)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        return optimizer
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.learning_rate,
+            weight_decay=0.01
+        )
+
+        if self.max_steps is None:
+            self.max_steps = self.trainer.estimated_stepping_batches
+
+        scheduler = {
+            "scheduler": get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=self.warmup_steps,
+                num_training_steps=self.max_steps
+            ),
+            "interval": "step",
+            "frequency": 1
+        }
+
+        return [optimizer], [scheduler]
 
     def train_dataloader(self):
         train_dataset = DocumentCleaningDataset(
