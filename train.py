@@ -64,12 +64,15 @@ class DocumentCleaningModule(pl.LightningModule):
         self.mse_loss = nn.MSELoss()
         self.learning_rate = learning_rate
 
+    def forward(self, x):
+        return self.model(x)
+
     def training_step(self, batch, batch_idx):
         clean = batch['clean']
         corrupted = batch['corrupted']
 
         with torch.cuda.amp.autocast():
-            cleaned = self(corrupted)
+            cleaned = self.model(corrupted)
             clean = clean * 2 - 1  # Scale to [-1, 1] to match tanh output
             loss = self.mse_loss(cleaned, clean)
 
@@ -84,7 +87,7 @@ class DocumentCleaningModule(pl.LightningModule):
         clean = batch['clean']
         corrupted = batch['corrupted']
 
-        cleaned = self(corrupted)
+        cleaned = self.model(corrupted)
         clean = clean * 2 - 1
         loss = self.mse_loss(cleaned, clean)
 
