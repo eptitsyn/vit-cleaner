@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import ViTModel
+from vit_pytorch import Transformer
 
 
 class DocumentCleaningViT(nn.Module):
@@ -19,28 +20,25 @@ class DocumentCleaningViT(nn.Module):
         # Positional embeddings for decoder
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, hidden_size) * 0.02)
 
-        # Transformer Decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=hidden_size,
-            nhead=12,
-            dim_feedforward=hidden_size * 4,
-            dropout=0.1,
-            activation='gelu',
-            batch_first=True
-        )
-
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer,
-            num_layers=6
+        # Transformer Decoder from vit_pytorch
+        self.decoder = Transformer(
+            dim=hidden_size,
+            depth=6,  # Number of transformer layers
+            heads=12,  # Number of attention heads
+            dim_head=hidden_size // 12,  # Dimension per head
+            mlp_dim=hidden_size * 4,  # Feedforward dimension
+            dropout=0.1
         )
 
         # Learnable query embeddings for the decoder
         self.query_embeddings = nn.Parameter(torch.randn(1, self.num_patches, hidden_size) * 0.02)
 
-        # Final projection to patch pixels
+        # Final projection to patch pixels with layer norm
         self.to_pixels = nn.Sequential(
+            nn.LayerNorm(hidden_size),  # Added layer norm
             nn.Linear(hidden_size, hidden_size * 2),
             nn.GELU(),
+            nn.LayerNorm(hidden_size * 2),  # Added layer norm
             nn.Linear(hidden_size * 2, patch_size * patch_size * 3),
             nn.GELU()
         )
@@ -48,11 +46,12 @@ class DocumentCleaningViT(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
 
-        # Get encoder features [batch_size, num_patches + 1, hidden_size]
-        encoder_output = self.encoder(x).last_hidden_state
+        # Get encoder features
+        with torch.no_grad():  # Freeze encoder initially
+            encoder_output = self.encoder(x).last_hidden_state
 
         # Remove CLS token and use as memory
-        memory = encoder_output[:, 1:, :]
+        memory = encoder_output[:, 1:, :]  # [B, num_patches, hidden_size]
 
         # Add positional information to memory
         memory = memory + self.pos_embedding
@@ -61,11 +60,14 @@ class DocumentCleaningViT(nn.Module):
         query = self.query_embeddings.expand(batch_size, -1, -1)
         query = query + self.pos_embedding
 
-        # Decode
-        decoded_features = self.decoder(
-            query,
-            memory
-        )
+        # Concatenate for self-attention in decoder
+        decoder_input = torch.cat([query, memory], dim=1)  # [B, 2*num_patches, hidden_size]
+
+        # Pass through decoder
+        decoded_features = self.decoder(decoder_input)
+
+        # Extract query part
+        decoded_features = decoded_features[:, :self.num_patches, :]
 
         # Project to pixels
         patches = self.to_pixels(decoded_features)
