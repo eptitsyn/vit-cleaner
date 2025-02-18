@@ -36,19 +36,14 @@ class DocumentCleaningViT(nn.Module):
         # Final projection to patch pixels with layer norm
         self.to_pixels = nn.Sequential(
             nn.LayerNorm(hidden_size),  # Added layer norm
-            nn.Linear(hidden_size, hidden_size * 2),
-            nn.GELU(),
-            nn.LayerNorm(hidden_size * 2),  # Added layer norm
-            nn.Linear(hidden_size * 2, patch_size * patch_size * 3),
-            nn.GELU()
+            nn.Linear(hidden_size, patch_size * patch_size * 3),
         )
 
     def forward(self, x):
         batch_size = x.shape[0]
 
         # Get encoder features
-        with torch.no_grad():  # Freeze encoder initially
-            encoder_output = self.encoder(x).last_hidden_state
+        encoder_output = self.encoder(x).last_hidden_state
 
         # Remove CLS token and use as memory
         memory = encoder_output[:, 1:, :]  # [B, num_patches, hidden_size]

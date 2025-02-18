@@ -81,13 +81,9 @@ class DocumentCleaningModule(pl.LightningModule):
             clean = clean * 2 - 1  # Scale to [-1, 1] to match tanh output
             loss = self.mse_loss(cleaned, clean)
 
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                self.log(f'params/{name}', param.norm(), on_step=True)
-
         self.log('train_loss', loss, on_step=True, prog_bar=True)
 
-        if self.global_step % 500 == 0:
+        if self.global_step % 100 == 0:
             self._log_images(clean, corrupted, cleaned, 'train')
 
         return loss
@@ -102,8 +98,7 @@ class DocumentCleaningModule(pl.LightningModule):
 
         self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        if self.global_step % 500 == 0:
-            self._log_images(clean, corrupted, cleaned, 'val')
+        self._log_images(clean, corrupted, cleaned, 'val')
 
         return loss
 
@@ -198,9 +193,10 @@ def main():
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',
         dirpath='checkpoints',
-        filename='document-cleaning-{epoch:02d}-{val_loss:.2f}',
+        filename='document-cleaning-{epoch:02d}-{val_loss:.3f}',
         save_top_k=3,
-        mode='min'
+        mode='min',
+        save_last=True
     )
 
     trainer = pl.Trainer(
@@ -222,7 +218,7 @@ def main():
     else:
         model = DocumentCleaningModule(**vars(args))
 
-    trainer.fit(model, ckpt_path=args.ckpt_path)
+    trainer.fit(model)
 
 
 if __name__ == '__main__':
